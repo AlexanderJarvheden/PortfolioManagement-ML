@@ -1,7 +1,4 @@
-{
-	"name": "Fear and Greed Index",
-	"data": [
-fng_value,fng_classification,date
+Date,Fng_value,Fng_classification
 17-02-2025,51,Neutral
 16-02-2025,54,Neutral
 15-02-2025,50,Neutral
@@ -2572,8 +2569,3 @@ fng_value,fng_classification,date
 03-02-2018,40,Fear
 02-02-2018,15,Extreme Fear
 01-02-2018,30,Fear
-	],
-	"metadata": {
-		"error": null
-	}
-}
