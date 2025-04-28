@@ -50,9 +50,25 @@ from xgboost import XGBClassifier, XGBRegressor
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import Pipeline
 from sklearn.compose import ColumnTransformer
+from joblib import dump, load
 
 ACTION_MAP = {-1: "sell", 0: "hold", 1: "buy"}
 REV_ACTION_MAP = {v: k for k, v in ACTION_MAP.items()}
+
+# ---------------------------------------------------------------------
+# Data helpers
+# ---------------------------------------------------------------------
+
+def load_data(path: str | pathlib.Path) -> pd.DataFrame:
+    """Load csv or xlsx/ipynb exported to csv. Automatically parses Date."""
+    path = pathlib.Path(path)
+    if path.suffix.lower() == ".csv":
+        df = pd.read_csv(path, parse_dates=["Date"])
+    elif path.suffix.lower() in {".xlsx", ".xls"}:
+        df = pd.read_excel(path, parse_dates=["Date"])
+    else:
+        raise ValueError("Unsupported file type. Convert to CSV or XLSX.")
+    return df.sort_values("Date").reset_index(drop=True)
 
 # ---------------------------------------------------------------------
 # Feature engineering
@@ -178,7 +194,6 @@ class Trainer:
         if self.scaler is None or self.clf is None:
             raise RuntimeError("Model not fitted or loaded.")
         feats = engineer_features(latest_rows)
-        print("hello")
         X = feats[self.feature_names].tail(1)  # use last engineered row
         X_scaled = self.scaler.transform(X)
         proba = self.clf.predict_proba(X_scaled)[0]
@@ -190,3 +205,43 @@ class Trainer:
         inverse_map = {v: k for k, v in mapped.items()}
         action_num = inverse_map[action_idx]
         return ACTION_MAP[action_num], amount, certainty
+
+    # -------------------------------------------------------------
+    def save(self, directory: str | pathlib.Path):
+        directory = pathlib.Path(directory)
+        directory.mkdir(parents=True, exist_ok=True)
+        dump(
+            {
+                "clf": self.clf,
+                "reg": self.reg,
+                "scaler": self.scaler,
+                "feature_names": self.feature_names,
+            },
+            directory / "xgb_fgi.joblib",
+        )
+
+    # -------------------------------------------------------------
+    @classmethod
+    def load(cls, directory: str | pathlib.Path) -> "Trainer":
+        obj = load(pathlib.Path(directory) / "xgb_fgi.joblib")
+        t = cls(obj["clf"], obj["reg"])
+        t.scaler = obj["scaler"]
+        t.feature_names = obj["feature_names"]
+        return t
+
+# ---------------------------------------------------------------------
+# Script entry‑point (optional CLI)
+# ---------------------------------------------------------------------
+if __name__ == "__main__":
+    import argparse, sys
+
+    p = argparse.ArgumentParser(description="Train XGBoost FGI model")
+    p.add_argument("data", help="CSV/XLSX file containing Date,Crypto_FGI,Close,Change %")
+    p.add_argument("--out", default="models", help="Directory to save model artefacts")
+    args = p.parse_args()
+
+    df = load_data(args.data)
+    trainer = Trainer()
+    trainer.fit(df)
+    trainer.save(args.out)
+    print(f"Model saved to {args.out}/xgb_fgi.joblib", file=sys.stderr)
