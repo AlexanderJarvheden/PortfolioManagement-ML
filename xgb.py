@@ -178,6 +178,7 @@ class Trainer:
         if self.scaler is None or self.clf is None:
             raise RuntimeError("Model not fitted or loaded.")
         feats = engineer_features(latest_rows)
+        print("hello")
         X = feats[self.feature_names].tail(1)  # use last engineered row
         X_scaled = self.scaler.transform(X)
         proba = self.clf.predict_proba(X_scaled)[0]
