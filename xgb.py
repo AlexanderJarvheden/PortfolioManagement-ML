@@ -52,6 +52,11 @@ from sklearn.pipeline import Pipeline
 from sklearn.compose import ColumnTransformer
 from joblib import dump, load
 
+from sklearn.calibration import CalibratedClassifierCV
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score
+from sklearn.metrics import mean_squared_error
+
 ACTION_MAP = {-1: "sell", 0: "hold", 1: "buy"}
 REV_ACTION_MAP = {v: k for k, v in ACTION_MAP.items()}
 
@@ -163,71 +168,70 @@ class Trainer:
             objective="reg:squarederror",
             random_state=42,
         )
-        self.scaler = None  # will be a fitted StandardScaler
-        self.feature_names: list[str] | None = None
+        self.scaler = None
+        self.feature_names = None
+        self.regression_error = None
 
-    # -------------------------------------------------------------
     def fit(self, raw_df: pd.DataFrame):
         df = engineer_features(raw_df)
         y_action, y_amount = label_targets(df)
-    # Align X with y
+
         X = df.iloc[:-1]
         X = X.drop(columns=["Date"])
-    
-    # Spara feature-namn här!
+
         self.feature_names = X.columns.tolist()
-    
-    # Scale features
+
         self.scaler = StandardScaler()
         X_scaled = self.scaler.fit_transform(X)
 
-    # Fit models
-        self.clf.fit(X_scaled, y_action)
-        self.reg.fit(X_scaled, y_amount)
+    # ➤ Träna på 80%, spara 20% till riktig testning
+        X_train, X_test, y_train, y_test = train_test_split(
+            X_scaled, y_amount, test_size=0.2, random_state=42
+    )
+
+        self.reg.fit(X_train, y_train)
+
+    # ➤ Beräkna regressionens fel på TESTSET, inte träning
+        y_pred_test = self.reg.predict(X_test)
+        self.regression_error = mean_squared_error(y_test, y_pred_test)
+
+        print(f"[INFO] Trained regressor — Test MSE: {self.regression_error:.6f}")
+
         return self
+
 
 
     # -------------------------------------------------------------
     def predict(self, latest_rows: pd.DataFrame):
-        """
-        Returnerar:
-        mu_view     — förväntad %-avkastning (log-return)   → Q till BL
-        confidence  — softmax-sannolikhet för vald riktning → c till BL
-        """
         if self.scaler is None or self.clf is None:
             raise RuntimeError("Model not fitted or loaded.")
 
         feats = engineer_features(latest_rows)
-        X     = feats[self.feature_names].tail(1)            # senaste rad
+        X     = feats[self.feature_names].tail(1)
         X_s   = self.scaler.transform(X)
 
-    # --- classifier ---
-        proba        = self.clf.predict_proba(X_s)[0]        # [p_sell,p_hold,p_buy]
-        action_idx   = int(np.argmax(proba))                 # 0/1/2
-        confidence   = float(proba[action_idx])              # 0-1
+    # --- Regressor ---
+        amount_pct = float(self.reg.predict(X_s)[0])
 
-    # mappar index → riktning −1 / 0 / +1
-        idx2sign = {0: -1, 1: 0, 2: 1}
-        sign     = idx2sign[action_idx]
-
-    # --- regressor ---
-        amount_pct = float(self.reg.predict(X_s)[0])         # ex +0.07
-
-    # gör om till log-return-vy (kan hoppa log om du vill stanna i %)
-        if sign == 0:
-    # Neutral klass: använd regressorns värde (med tecken) direkt
-            mu_view = np.log(1 + amount_pct)            # ≈ +0.00381
+    # Gör om till log-return vy
+        if amount_pct >= 0:
+            mu_view = np.log(1 + amount_pct)
         else:
-    # Buy / Sell: behåll riktnings‐tecknet från classifiern
-            mu_view = sign * np.log(1 + abs(amount_pct))
-        
-        print("DEBUG — probs:", proba,
-      "| sign:", sign,
-      "| amount_pct:", amount_pct,
-      "| mu_view:", mu_view,
-      "| confidence:", confidence)
+            mu_view = -np.log(1 + abs(amount_pct))
+
+    # --- Confidence ---
+    # ➔ Ny formel: |prediction| / (|prediction| + sqrt(mse))
+        if self.regression_error is None:
+            raise RuntimeError("Model has no regression error recorded (fit() not run?).")
+        mse = self.regression_error
+        rmse = np.sqrt(mse)
+        confidence = abs(amount_pct) / (abs(amount_pct) + rmse)
+
+        print(f"DEBUG — amount_pct: {amount_pct} | mu_view: {mu_view} | confidence: {confidence}")
 
         return mu_view, confidence
+
+
 
     # -------------------------------------------------------------
     def save(self, directory: str | pathlib.Path):
