@@ -160,11 +160,14 @@ class Trainer:
             random_state=42,
         )
         self.reg = reg or XGBRegressor(
-            n_estimators=400,
-            learning_rate=0.03,
-            max_depth=6,
-            subsample=0.8,
-            colsample_bytree=0.8,
+            n_estimators=391,
+            learning_rate=0.17325459975947805,
+            max_depth=10,
+            subsample=0.6621349590183688,
+            colsample_bytree=0.748811322879415,
+            gamma=0.21536167152019156,
+            reg_alpha=0.06750949051842556,
+            reg_lambda=0.4791100358107637,
             objective="reg:squarederror",
             random_state=42,
         )
