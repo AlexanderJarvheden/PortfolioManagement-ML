@@ -83,24 +83,24 @@ def engineer_features(df: pd.DataFrame, lookback: int = 7) -> pd.DataFrame:
         print("hello man")
     # Base numerical columns
     df["Close_lag1"] = df["Close"].shift(1)
-    df["FGI_lag1"] = df["Crypto_FGI"].shift(1)
+    df["FGI_lag1"] = df["FGI"].shift(1)
     df["Change_pct"] = (
         df["Close"].pct_change() * 100 if "Change %" not in df else df["Change %"].astype(float)
     )
     
     # Rolling statistics
-    df["FGI_roll_mean"] = df["Crypto_FGI"].rolling(lookback).mean()
-    df["FGI_roll_std"] = df["Crypto_FGI"].rolling(lookback).std()
+    df["FGI_roll_mean"] = df["FGI"].rolling(lookback).mean()
+    df["FGI_roll_std"] = df["FGI"].rolling(lookback).std()
     df["Price_roll_mean"] = df["Close"].rolling(lookback).mean()
     df["Price_roll_std"] = df["Close"].rolling(lookback).std()
     
     # Momentum features
-    df["FGI_mom"] = df["Crypto_FGI"].diff(lookback)
+    df["FGI_mom"] = df["FGI"].diff(lookback)
     df["Price_mom"] = df["Close"].diff(lookback)
     
-    # Date‑time features
-    df["dayofweek"] = df["Date"].dt.dayofweek
-    df["month"] = df["Date"].dt.month
+    # # Date‑time features
+    # df["dayofweek"] = df["Date"].dt.dayofweek
+    # df["month"] = df["Date"].dt.month
 
     # Drop rows with NaNs created by shifting/rolling
     df = df.dropna().reset_index(drop=True)
@@ -112,32 +112,30 @@ def engineer_features(df: pd.DataFrame, lookback: int = 7) -> pd.DataFrame:
 # Target engineering
 # ---------------------------------------------------------------------
 
-def label_targets(df: pd.DataFrame, threshold: float = 1.0) -> Tuple[np.ndarray, np.ndarray]:
-    """Returnerar (action_labels, amount_targets) baserat på nästa dags procentuella prisförändring.
-    
-    - action_labels: 0 = Sell, 1 = Hold, 2 = Buy
-    - amount_targets: Skalad rörelse mellan 0 och 1
+def label_targets(df: pd.DataFrame,
+                  thr: float = 1.0,
+                  clip_pct: float = 10.0):
     """
-    # Nästa dags procentuella förändring
-    fwd_change = df["Change_pct"].shift(-1)
-    
-    # Bestäm action: 1 = köp, -1 = sälj, 0 = neutral
-    action = np.where(
-        fwd_change > threshold, 1,
-        np.where(fwd_change < -threshold, -1, 0)
-    )
-    
-    # Skala rörelse (magnitude) till intervallet [0, 1]
-    amount = np.clip(np.abs(fwd_change), 0, 10) / 10.0
+    Returnerar:
+        action_labels  (np.ndarray)  — 0=Sell, 1=Hold, 2=Buy   (för classifiern)
+        amount_targets (np.ndarray)  — framtida %-rörelse       (för regressorn)
 
-    # Ta bort sista raden (ingen nästa dags förändring)
-    valid = ~fwd_change.isna()
-    
-    # Skifta action så att -1 ➔ 0, 0 ➔ 1, 1 ➔ 2 (som XGBClassifier kräver)
-    action_shifted = (action[valid].astype(int) + 1)
-    
-    # Returnera
-    return action_shifted, amount[valid].to_numpy()
+    • action bestäms av threshold 'thr' (1 %=default)
+    • amount är faktiska fwd-change i procent, klippt till ±clip_pct
+      och omräknat till decimal (+7 % → 0.07).
+    """
+    fwd = df["Change_pct"].shift(-1)                 # nästa dags %-rörelse
+
+    action_raw = np.where(fwd >  thr,  1,            # Buy
+                 np.where(fwd < -thr, -1, 0))        # Sell / Hold
+
+    amount = fwd.clip(-clip_pct, clip_pct) / 100.0   # +7%→0.07,  -4%→-0.04
+
+    valid = ~fwd.isna()                              # sista raden saknar target
+    action_labels  = (action_raw[valid] + 1)         # -1→0, 0→1, 1→2
+    amount_targets = amount[valid].to_numpy()
+
+    return action_labels, amount_targets
 
 # ---------------------------------------------------------------------
 # Trainer class
@@ -190,21 +188,46 @@ class Trainer:
 
 
     # -------------------------------------------------------------
-    def predict(self, latest_rows: pd.DataFrame) -> Tuple[str, float, float]:
+    def predict(self, latest_rows: pd.DataFrame):
+        """
+        Returnerar:
+        mu_view     — förväntad %-avkastning (log-return)   → Q till BL
+        confidence  — softmax-sannolikhet för vald riktning → c till BL
+        """
         if self.scaler is None or self.clf is None:
             raise RuntimeError("Model not fitted or loaded.")
+
         feats = engineer_features(latest_rows)
-        X = feats[self.feature_names].tail(1)  # use last engineered row
-        X_scaled = self.scaler.transform(X)
-        proba = self.clf.predict_proba(X_scaled)[0]
-        action_idx = int(np.argmax(proba))
-        certainty = float(np.max(proba))
-        amount = float(np.clip(self.reg.predict(X_scaled)[0], 0, 1))
-        # Map action index (0,1,2) to {-1,0,1}
-        mapped = {-1: 0, 0: 1, 1: 2}  # REV mapping of ACTION_MAP ordering
-        inverse_map = {v: k for k, v in mapped.items()}
-        action_num = inverse_map[action_idx]
-        return ACTION_MAP[action_num], amount, certainty
+        X     = feats[self.feature_names].tail(1)            # senaste rad
+        X_s   = self.scaler.transform(X)
+
+    # --- classifier ---
+        proba        = self.clf.predict_proba(X_s)[0]        # [p_sell,p_hold,p_buy]
+        action_idx   = int(np.argmax(proba))                 # 0/1/2
+        confidence   = float(proba[action_idx])              # 0-1
+
+    # mappar index → riktning −1 / 0 / +1
+        idx2sign = {0: -1, 1: 0, 2: 1}
+        sign     = idx2sign[action_idx]
+
+    # --- regressor ---
+        amount_pct = float(self.reg.predict(X_s)[0])         # ex +0.07
+
+    # gör om till log-return-vy (kan hoppa log om du vill stanna i %)
+        if sign == 0:
+    # Neutral klass: använd regressorns värde (med tecken) direkt
+            mu_view = np.log(1 + amount_pct)            # ≈ +0.00381
+        else:
+    # Buy / Sell: behåll riktnings‐tecknet från classifiern
+            mu_view = sign * np.log(1 + abs(amount_pct))
+        
+        print("DEBUG — probs:", proba,
+      "| sign:", sign,
+      "| amount_pct:", amount_pct,
+      "| mu_view:", mu_view,
+      "| confidence:", confidence)
+
+        return mu_view, confidence
 
     # -------------------------------------------------------------
     def save(self, directory: str | pathlib.Path):
@@ -236,7 +259,7 @@ if __name__ == "__main__":
     import argparse, sys
 
     p = argparse.ArgumentParser(description="Train XGBoost FGI model")
-    p.add_argument("data", help="CSV/XLSX file containing Date,Crypto_FGI,Close,Change %")
+    p.add_argument("data", help="CSV/XLSX file containing Date,FGI,Close,Change %")
     p.add_argument("--out", default="models", help="Directory to save model artefacts")
     args = p.parse_args()
 
