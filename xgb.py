@@ -85,7 +85,6 @@ def engineer_features(df: pd.DataFrame, lookback: int = 7) -> pd.DataFrame:
     # Säkerställ att 'Date' är datetime
     if not np.issubdtype(df["Date"].dtype, np.datetime64):
         df["Date"] = pd.to_datetime(df["Date"], errors="coerce")  # errors="coerce" sätter ogiltiga till NaT
-        print("hello man")
     # Base numerical columns
     df["Close_lag1"] = df["Close"].shift(1)
     df["FGI_lag1"] = df["FGI"].shift(1)
@@ -170,6 +169,14 @@ class Trainer:
             reg_lambda=0.4791100358107637,
             objective="reg:squarederror",
             random_state=42,
+            
+            # n_estimators=400,
+            # learning_rate=0.03,
+            # max_depth=6,
+            # subsample=0.8,
+            # colsample_bytree=0.8,
+            # objective="reg:squarederror",
+            # random_state=42,
         )
         self.scaler = None
         self.feature_names = None
@@ -230,7 +237,7 @@ class Trainer:
         rmse = np.sqrt(mse)
         confidence = abs(amount_pct) / (abs(amount_pct) + rmse)
 
-        print(f"DEBUG — amount_pct: {amount_pct} | mu_view: {mu_view} | confidence: {confidence}")
+        # print(f"DEBUG — amount_pct: {amount_pct} | mu_view: {mu_view} | confidence: {confidence}")
 
         return mu_view, confidence
 
